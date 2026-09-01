@@ -3,7 +3,44 @@
 #include "../../hyprctlCompat.hpp"
 #include "tests.hpp"
 
+#include <charconv>
 #include <format>
+#include <optional>
+
+// pull one window's block out of a /clients response, so its geometry can be
+// read without focusing it. the workspace disambiguates a class that exists
+// on more than one.
+static std::string windowBlock(const std::string& clients, const std::string& cls, std::optional<int> ws = std::nullopt) {
+    const auto CLASS = std::format("\n\tclass: {}\n", cls);
+    const auto WS    = ws ? std::format("\n\tworkspace: {} (", *ws) : "";
+
+    size_t     pos = 0;
+    while ((pos = clients.find("Window ", pos)) != std::string::npos) {
+        const auto END   = clients.find("Window ", pos + 1);
+        const auto BLOCK = clients.substr(pos, END == std::string::npos ? std::string::npos : END - pos);
+
+        if (BLOCK.contains(CLASS) && BLOCK.contains(WS))
+            return BLOCK;
+
+        pos++;
+    }
+
+    return "";
+}
+
+// "at" and "size" are printed as "x,y"
+static std::pair<int, int> attributePair(const std::string& block, const std::string& attr) {
+    const auto VALUE = Tests::getAttribute(block, attr);
+    const auto COMMA = VALUE.find(',');
+
+    if (COMMA == std::string::npos)
+        return {0, 0};
+
+    int x = 0, y = 0;
+    std::from_chars(VALUE.data(), VALUE.data() + COMMA, x);
+    std::from_chars(VALUE.data() + COMMA + 1, VALUE.data() + VALUE.size(), y);
+    return {x, y};
+}
 
 TEST_CASE(dwindleFloatClamp) {
     for (auto const& win : {"a", "b", "c"}) {
@@ -1222,4 +1259,483 @@ TEST_CASE(dwindleFullsreenCenterDispatchSavesPos) {
         EXPECT_CONTAINS(str, "fullscreen: 0");
         EXPECT_CONTAINS(str, "fullscreenClient: 0");
     }
+}
+
+TEST_CASE(dwindleLayoutMsgWorkspaceTarget) {
+
+    // layoutmsg can address a workspace other than the active one, for the
+    // messages that are safe to handle that way - which mostly means naming
+    // their own target, though the preselect reset qualifies by touching
+    // nothing but that workspace's own pending state.
+
+    const auto targeted = [](const std::string& ws, const std::string& msg) {
+        return getFromSocket(std::format("/dispatch hl.dsp.layout({{ message = '{}', workspace = '{}' }})", msg, ws));
+    };
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '2' })"));
+    for (auto const& win : {"a", "b", "c"}) {
+        SPAWN_KITTY(win);
+    }
+    Tests::waitUntilWindowsN(3);
+
+    // leave that workspace entirely
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+    SPAWN_KITTY("d");
+    Tests::waitUntilWindowsN(4);
+
+    const auto BEFORE   = getFromSocket("/clients");
+    const auto C_BEFORE = Tests::getAttribute(windowBlock(BEFORE, "c"), "at");
+    const auto D_BEFORE = Tests::getAttribute(windowBlock(BEFORE, "d"), "at");
+    EXPECT_NOT(C_BEFORE, std::string{});
+
+    // restructure workspace 2 while sitting on workspace 1
+    OK(targeted("2", "movetoroot class:c"));
+
+    const auto AFTER = getFromSocket("/clients");
+    EXPECT_NOT(Tests::getAttribute(windowBlock(AFTER, "c"), "at"), C_BEFORE); // the addressed workspace changed
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "d"), "at"), D_BEFORE);     // the active one did not
+    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 1");
+
+    // the workspace field takes the selector forms dispatchers accept, and has
+    // to name one that exists - the algorithm addressed belongs to a live space
+    EXPECT_NOT(targeted("999999", "movetoroot class:c"), "ok");
+    EXPECT_NOT(targeted("name:nosuchworkspace", "movetoroot class:c"), "ok");
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = 'name:build' })"));
+    for (auto const& win : {"e", "f", "g"}) {
+        SPAWN_KITTY(win);
+    }
+    Tests::waitUntilWindowsN(7);
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+
+    const auto G_BEFORE = Tests::getAttribute(windowBlock(getFromSocket("/clients"), "g"), "at");
+    OK(targeted("name:build", "movetoroot class:g"));
+    EXPECT_NOT(Tests::getAttribute(windowBlock(getFromSocket("/clients"), "g"), "at"), G_BEFORE);
+    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 1");
+
+    // a message may only be addressed to a workspace if handling it cannot
+    // reach outside that workspace. these take their node from the focused
+    // window, so they would act on whatever the user is looking at - or, for
+    // the first three, quietly do nothing and report success.
+    for (auto const& msg : {"togglesplit", "swapsplit", "rotatesplit", "splitratio 0.5"}) {
+        EXPECT_NOT(targeted("1", msg), "ok");
+        EXPECT_NOT(targeted("2", msg), "ok");
+    }
+
+    // the two that act on a node are refused when they do not name one
+    EXPECT_NOT(targeted("2", "movetoroot"), "ok");
+    EXPECT_NOT(targeted("2", "preselect r"), "ok");
+
+    // but a preselect reset names nothing because it places nothing - it only
+    // clears that workspace's pending state, which is safe to do from here
+    OK(targeted("2", "preselect x"));
+
+    // and the gate does not care whether the workspace addressed is the one in
+    // focus. the same messages are allowed, and the same ones refused.
+    OK(targeted("1", "preselect r class:d"));
+    EXPECT_NOT(targeted("1", "togglesplit"), "ok");
+
+    // "active" means the focused window, so it would answer differently
+    // depending on where the user is looking. refused either side of focus,
+    // for both messages that take a selector.
+    EXPECT_NOT(targeted("2", "preselect r active"), "ok");
+    EXPECT_NOT(targeted("1", "preselect r active"), "ok");
+    EXPECT_NOT(targeted("2", "movetoroot active"), "ok");
+    EXPECT_NOT(targeted("1", "movetoroot active"), "ok");
+
+    // the table form is for addressing a workspace, so it has to name one. a
+    // missing, empty or mistyped field must not fall through to the active
+    // workspace, which is what the string form is for.
+    //
+    // the message below is one that *would* succeed unaddressed - d is tiled
+    // on the active workspace - so these can only pass by being refused.
+    EXPECT_NOT(getFromSocket("/dispatch hl.dsp.layout({ message = 'preselect r class:d' })"), "ok");
+    EXPECT_NOT(getFromSocket("/dispatch hl.dsp.layout({ message = 'preselect r class:d', workspace = '' })"), "ok");
+    EXPECT_NOT(getFromSocket("/dispatch hl.dsp.layout({ message = 'preselect r class:d', workpace = '1' })"), "ok");
+    EXPECT_NOT(getFromSocket("/dispatch hl.dsp.layout({ message = '', workspace = '1' })"), "ok");
+
+    // the string form still reaches the active workspace, unaddressed
+    OK(getFromSocket("/dispatch hl.dsp.layout('preselect r class:d')"));
+
+    // workspace 1 outlives the harness reset, and its algorithm with it, so
+    // nothing may be left armed here for the next test to consume
+    OK(getFromSocket("/dispatch hl.dsp.layout('preselect x')"));
+
+    // special workspaces address like any other. this goes last because an
+    // open special workspace is what an unaddressed message resolves to, so
+    // leaving one open would change the meaning of every check above.
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = 'special:scratch' })"));
+    for (auto const& win : {"h", "i", "j"}) {
+        SPAWN_KITTY(win);
+    }
+    Tests::waitUntilWindowsN(10);
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+
+    const auto J_BEFORE = Tests::getAttribute(windowBlock(getFromSocket("/clients"), "j"), "at");
+    OK(targeted("special:scratch", "movetoroot class:j"));
+    EXPECT_NOT(Tests::getAttribute(windowBlock(getFromSocket("/clients"), "j"), "at"), J_BEFORE);
+}
+
+TEST_CASE(dwindlePreselectNamedTarget) {
+
+    // preselect can name the window the next one splits off, instead of it
+    // being implied by the pointer or the focused window. asserted via
+    // directional focus so it doesn't depend on the output size.
+
+    for (auto const& win : {"a", "b"}) {
+        SPAWN_KITTY(win);
+    }
+    Tests::waitUntilWindowsN(2);
+
+    // b is focused; ask for the next window to split a anyway
+    OK(getFromSocket("/dispatch hl.dsp.focus({ window = 'class:b' })"));
+    OK(getFromSocket("/dispatch hl.dsp.layout('preselect r class:a')"));
+    SPAWN_KITTY("c");
+    Tests::waitUntilWindowsN(3);
+
+    // c split a, so it sits directly right of it
+    OK(getFromSocket("/dispatch hl.dsp.focus({ window = 'class:c' })"));
+    OK(getFromSocket("/dispatch hl.dsp.focus({ direction = 'l' })"));
+    EXPECT_CONTAINS(getFromSocket("/activewindow"), "class: a");
+
+    // and had it not been named, b (focused) would have been split instead
+    OK(getFromSocket("/dispatch hl.dsp.focus({ window = 'class:b' })"));
+    OK(getFromSocket("/dispatch hl.dsp.layout('preselect r')"));
+    SPAWN_KITTY("d");
+    Tests::waitUntilWindowsN(4);
+    OK(getFromSocket("/dispatch hl.dsp.focus({ window = 'class:d' })"));
+    OK(getFromSocket("/dispatch hl.dsp.focus({ direction = 'l' })"));
+    EXPECT_CONTAINS(getFromSocket("/activewindow"), "class: b");
+
+    // an unnamed preselect replaces a named one rather than inheriting its
+    // target, so e follows focus. nothing opens between the two messages here,
+    // which is what makes the stale target reachable.
+    OK(getFromSocket("/dispatch hl.dsp.layout('preselect r class:a')"));
+    OK(getFromSocket("/dispatch hl.dsp.focus({ window = 'class:b' })"));
+    OK(getFromSocket("/dispatch hl.dsp.layout('preselect r')"));
+
+    const auto STALE   = getFromSocket("/clients");
+    const auto STALE_A = Tests::getAttribute(windowBlock(STALE, "a"), "size");
+    const auto STALE_B = Tests::getAttribute(windowBlock(STALE, "b"), "size");
+
+    SPAWN_KITTY("e");
+    Tests::waitUntilWindowsN(5);
+
+    const auto UNSTALE = getFromSocket("/clients");
+    EXPECT(Tests::getAttribute(windowBlock(UNSTALE, "a"), "size"), STALE_A);
+    EXPECT_NOT(Tests::getAttribute(windowBlock(UNSTALE, "b"), "size"), STALE_B);
+
+    // a selector matching nothing is an error, not a silent no-op
+    EXPECT_NOT(getFromSocket("/dispatch hl.dsp.layout('preselect r class:nosuchwindow')"), "ok");
+
+    // and a rejected message must leave nothing armed. the selector below is
+    // good, but the direction between it and the message name is empty, so if
+    // the target were taken before the message was validated, the next window
+    // would split a instead of following focus.
+    const auto BEFORE = getFromSocket("/clients");
+    const auto A_AT   = Tests::getAttribute(windowBlock(BEFORE, "a"), "at");
+    const auto A_SIZE = Tests::getAttribute(windowBlock(BEFORE, "a"), "size");
+    const auto B_SIZE = Tests::getAttribute(windowBlock(BEFORE, "b"), "size");
+
+    EXPECT_NOT(getFromSocket("/dispatch hl.dsp.layout('preselect  class:a')"), "ok");
+    OK(getFromSocket("/dispatch hl.dsp.focus({ window = 'class:b' })"));
+    SPAWN_KITTY("f");
+    Tests::waitUntilWindowsN(6);
+
+    const auto AFTER = getFromSocket("/clients");
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "a"), "at"), A_AT);
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "a"), "size"), A_SIZE);
+    EXPECT_NOT(Tests::getAttribute(windowBlock(AFTER, "b"), "size"), B_SIZE);
+
+    // a non-direction is the legacy reset for permanent_direction_override. it
+    // drops the pending target along with the direction, and has no window of
+    // its own to resolve - so it cannot fail on a selector that matches
+    // nothing, and g follows focus rather than the target armed just above.
+    OK(getFromSocket("/dispatch hl.dsp.layout('preselect r class:a')"));
+    OK(getFromSocket("/dispatch hl.dsp.layout('preselect x class:nosuchwindow')"));
+    OK(getFromSocket("/dispatch hl.dsp.focus({ window = 'class:b' })"));
+
+    const auto RESET   = getFromSocket("/clients");
+    const auto RESET_A = Tests::getAttribute(windowBlock(RESET, "a"), "size");
+    const auto RESET_B = Tests::getAttribute(windowBlock(RESET, "b"), "size");
+
+    SPAWN_KITTY("g");
+    Tests::waitUntilWindowsN(7);
+
+    const auto UNRESET = getFromSocket("/clients");
+    EXPECT(Tests::getAttribute(windowBlock(UNRESET, "a"), "size"), RESET_A);
+    EXPECT_NOT(Tests::getAttribute(windowBlock(UNRESET, "b"), "size"), RESET_B);
+}
+
+TEST_CASE(dwindlePreselectAcrossWorkspaces) {
+
+    // both halves at once: aim an off-screen workspace's next split from the
+    // workspace you are sitting on, then open a window there. the pointer is
+    // parked over the window the fallback would otherwise have picked, so this
+    // fails if the selector is ignored.
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '5' })"));
+    for (auto const& win : {"a", "b"}) {
+        SPAWN_KITTY(win);
+    }
+    Tests::waitUntilWindowsN(2);
+
+    // leave 5 behind, and put a window on 1 to keep an eye on
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+    SPAWN_KITTY("c");
+    Tests::waitUntilWindowsN(3);
+
+    const auto BEFORE = getFromSocket("/clients");
+    const auto A_AT   = Tests::getAttribute(windowBlock(BEFORE, "a"), "at");
+    const auto A_SIZE = Tests::getAttribute(windowBlock(BEFORE, "a"), "size");
+    const auto B_AT   = Tests::getAttribute(windowBlock(BEFORE, "b"), "at");
+    const auto B_SIZE = Tests::getAttribute(windowBlock(BEFORE, "b"), "size");
+    const auto C_AT   = Tests::getAttribute(windowBlock(BEFORE, "c"), "at");
+    const auto C_SIZE = Tests::getAttribute(windowBlock(BEFORE, "c"), "size");
+    EXPECT_NOT(A_AT, std::string{});
+
+    // 5 is not on screen, but its nodes still cover the monitor. park the
+    // pointer in the middle of a, so getClosestNode would answer a.
+    const auto A_BOX   = attributePair(windowBlock(BEFORE, "a"), "at");
+    const auto A_EXTEN = attributePair(windowBlock(BEFORE, "a"), "size");
+    OK(getFromSocket(std::format("/dispatch hl.dsp.cursor.move({{ x = {}, y = {} }})", A_BOX.first + A_EXTEN.first / 2, A_BOX.second + A_EXTEN.second / 2)));
+    const auto CURSOR = getFromSocket("/cursorpos");
+
+    // c exists, but not on 5 - the selector has to answer for the workspace
+    // the message was addressed to
+    EXPECT_NOT(getFromSocket("/dispatch hl.dsp.layout({ message = 'preselect r class:c', workspace = '5' })"), "ok");
+
+    // now split b - unfocused, off screen, and not the one under the pointer.
+    // hyprtester spawns kitty itself rather than through a dispatcher, so d is
+    // placed with a window rule where a user would write an exec rule.
+    OK(getFromSocket("/dispatch hl.dsp.layout({ message = 'preselect r class:b', workspace = '5' })"));
+    OK(getFromSocket("/eval hl.window_rule({ match = { class = 'd' }, workspace = '5 silent' })"));
+    SPAWN_KITTY("d");
+    Tests::waitUntilWindowsN(4);
+
+    const auto AFTER   = getFromSocket("/clients");
+    const auto B_BLOCK = windowBlock(AFTER, "b");
+    const auto D_BLOCK = windowBlock(AFTER, "d");
+    const auto D_BOX   = attributePair(D_BLOCK, "at");
+    const auto D_EXTEN = attributePair(D_BLOCK, "size");
+
+    // d landed on 5 as b's sibling: b kept its corner but not its width, and d
+    // shares b's row, starting past b's left edge
+    EXPECT_CONTAINS(D_BLOCK, "workspace: 5");
+    EXPECT(Tests::getAttribute(B_BLOCK, "at"), B_AT);
+    EXPECT_NOT(Tests::getAttribute(B_BLOCK, "size"), B_SIZE);
+    EXPECT(D_BOX.second, attributePair(B_BLOCK, "at").second);
+    EXPECT(D_EXTEN.second, attributePair(B_BLOCK, "size").second);
+    EXPECT(D_BOX.first > attributePair(B_BLOCK, "at").first, true);
+
+    // the pointer's pick was overridden, so a is untouched
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "a"), "at"), A_AT);
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "a"), "size"), A_SIZE);
+
+    // and we never left workspace 1, nor did anything on it move. the pointer
+    // is part of that contract: this must run without disturbing the session
+    // it is running underneath.
+    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 1");
+    EXPECT(getFromSocket("/cursorpos"), CURSOR);
+
+    // the selector is scoped to workspace 5, so a window elsewhere is simply
+    // not found. a window that is on 5 but not in its tree is a different
+    // refusal, and floating d is the way to reach it.
+    OK(getFromSocket("/dispatch hl.dsp.window.float({ action = 'set', window = 'class:d' })"));
+    EXPECT_NOT(getFromSocket("/dispatch hl.dsp.layout({ message = 'preselect r class:d', workspace = '5' })"), "ok");
+    EXPECT_CONTAINS(getFromSocket("/activewindow"), "class: c");
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "c"), "at"), C_AT);
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "c"), "size"), C_SIZE);
+}
+
+TEST_CASE(dwindlePreselectSelectorScopedToWorkspace) {
+
+    // the selector answers for the workspace the message was addressed to. an
+    // unscoped query returns whichever match it enumerates first, so with the
+    // same class on two workspaces it finds one by enumeration order and
+    // rejects it for not being in the addressed tree.
+    //
+    // the decoy is deliberately created first. spawn it second and an unscoped
+    // query reaches the right window by luck, and this stops testing anything.
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+    SPAWN_KITTY("dup");
+    SPAWN_KITTY("one");
+    Tests::waitUntilWindowsN(2);
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '2' })"));
+    SPAWN_KITTY("dup");
+    SPAWN_KITTY("two");
+    Tests::waitUntilWindowsN(4);
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+
+    const auto BEFORE    = getFromSocket("/clients");
+    const auto DUP2_SIZE = Tests::getAttribute(windowBlock(BEFORE, "dup", 2), "size");
+    const auto DUP1_AT   = Tests::getAttribute(windowBlock(BEFORE, "dup", 1), "at");
+    const auto DUP1_SIZE = Tests::getAttribute(windowBlock(BEFORE, "dup", 1), "size");
+    const auto TWO_SIZE  = Tests::getAttribute(windowBlock(BEFORE, "two", 2), "size");
+    EXPECT_NOT(DUP2_SIZE, std::string{});
+    EXPECT_NOT(DUP1_SIZE, std::string{});
+
+    // both workspaces have a "dup". address 2's.
+    OK(getFromSocket("/dispatch hl.dsp.layout({ message = 'preselect r class:dup', workspace = '2' })"));
+    OK(getFromSocket("/eval hl.window_rule({ match = { class = 'new' }, workspace = '2 silent' })"));
+    SPAWN_KITTY("new");
+    Tests::waitUntilWindowsN(5);
+
+    const auto AFTER = getFromSocket("/clients");
+
+    // 2's dup was split
+    EXPECT_CONTAINS(windowBlock(AFTER, "new", 2), "class: new");
+    EXPECT_NOT(Tests::getAttribute(windowBlock(AFTER, "dup", 2), "size"), DUP2_SIZE);
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "two", 2), "size"), TWO_SIZE);
+
+    // 1's was not touched, and we never left it
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "dup", 1), "at"), DUP1_AT);
+    EXPECT(Tests::getAttribute(windowBlock(AFTER, "dup", 1), "size"), DUP1_SIZE);
+    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 1");
+}
+
+TEST_CASE(dwindleMovetorootSelectorIsAuthoritative) {
+
+    // movetoroot is allowed against an addressed workspace because it names
+    // the node it moves. that premise only holds if the selector is both
+    // scoped to the workspace addressed and authoritative - a selector that
+    // matches nothing must fail, not quietly fall back to the focused node.
+
+    const auto targeted = [](const std::string& ws, const std::string& msg) {
+        return getFromSocket(std::format("/dispatch hl.dsp.layout({{ message = '{}', workspace = '{}' }})", msg, ws));
+    };
+
+    // the decoy on workspace 1 is created first, so an unscoped query finds it
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+    SPAWN_KITTY("one");
+    SPAWN_KITTY("dup");
+    SPAWN_KITTY("uno");
+    Tests::waitUntilWindowsN(3);
+
+    // "dup" is not spawned first here: the first window on a workspace is a
+    // direct child of root, and movetoroot rightly refuses to move one there
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '2' })"));
+    SPAWN_KITTY("two");
+    SPAWN_KITTY("dup");
+    SPAWN_KITTY("dos");
+    Tests::waitUntilWindowsN(6);
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+
+    // movetoroot defaults to "stable", which keeps the moved window on the same
+    // side of the screen, so its corner alone need not move - compare the box
+    const auto boxOf = [](const std::string& clients, const std::string& cls, int ws) {
+        const auto BLOCK = windowBlock(clients, cls, ws);
+        return Tests::getAttribute(BLOCK, "at") + " " + Tests::getAttribute(BLOCK, "size");
+    };
+
+    const auto BEFORE   = getFromSocket("/clients");
+    const auto DUP2_BOX = boxOf(BEFORE, "dup", 2);
+    const auto DUP1_BOX = boxOf(BEFORE, "dup", 1);
+    EXPECT_NOT(DUP2_BOX, std::string{" "});
+
+    // both workspaces have a "dup"; the addressed one is what answers
+    OK(targeted("2", "movetoroot class:dup"));
+
+    const auto AFTER = getFromSocket("/clients");
+    EXPECT_NOT(boxOf(AFTER, "dup", 2), DUP2_BOX);
+    EXPECT(boxOf(AFTER, "dup", 1), DUP1_BOX);
+
+    // a selector matching nothing errors rather than acting on the focused
+    // node. workspace 1 is the active one here, so a fallback to focus would
+    // succeed and silently restructure it.
+    const auto SETTLED = getFromSocket("/clients");
+    EXPECT_NOT(targeted("1", "movetoroot class:nosuchwindow"), "ok");
+    EXPECT(getFromSocket("/clients"), SETTLED);
+
+    // and the same unaddressed, which is the path every existing config takes
+    EXPECT_NOT(getFromSocket("/dispatch hl.dsp.layout('movetoroot class:nosuchwindow')"), "ok");
+    EXPECT(getFromSocket("/clients"), SETTLED);
+
+    // the optional third argument still reaches the handler past the selector.
+    // both workspaces were built the same way, so a stable move on one and an
+    // unstable move on the other have to land differently.
+    const auto DUP2_STABLE = boxOf(getFromSocket("/clients"), "dup", 2);
+    OK(targeted("1", "movetoroot class:dup unstable"));
+
+    const auto DUP1_UNSTABLE = boxOf(getFromSocket("/clients"), "dup", 1);
+    EXPECT_NOT(DUP1_UNSTABLE, DUP1_BOX);    // it moved
+    EXPECT_NOT(DUP1_UNSTABLE, DUP2_STABLE); // and not to where stable put it
+
+    // an unnamed movetoroot reads "unstable" as its selector, so it is refused
+    // for naming nothing that exists rather than acting on the focused node
+    EXPECT_NOT(targeted("1", "movetoroot unstable"), "ok");
+}
+
+TEST_CASE(masterRefusesTargetedLayoutMsg) {
+
+    // the opt-in is per receiving algorithm, and the base class refuses. an
+    // algorithm that has not opted in gets nothing, whatever its messages are
+    // named - which is what lets plugin layouts stay safe by default.
+
+    OK(getFromSocket("r/eval hl.config({ general = { layout = 'master' } })"));
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '2' })"));
+    for (auto const& win : {"a", "b"}) {
+        SPAWN_KITTY(win);
+    }
+    Tests::waitUntilWindowsN(2);
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+    SPAWN_KITTY("c");
+    Tests::waitUntilWindowsN(3);
+
+    const auto BEFORE = getFromSocket("/clients");
+
+    // orientationleft is the sharp case: it clears fullscreen on the focused
+    // window before touching the addressed workspace's orientation
+    for (auto const& msg : {"orientationleft", "orientationnext", "swapwithmaster", "focusmaster", "mfact +0.1"}) {
+        EXPECT_NOT(getFromSocket(std::format("/dispatch hl.dsp.layout({{ message = '{}', workspace = '2' }})", msg)), "ok");
+        EXPECT_NOT(getFromSocket(std::format("/dispatch hl.dsp.layout({{ message = '{}', workspace = '1' }})", msg)), "ok");
+    }
+
+    // nothing moved on either workspace
+    EXPECT(getFromSocket("/clients"), BEFORE);
+
+    // and master still works normally when no workspace is addressed
+    OK(getFromSocket("/dispatch hl.dsp.layout('orientationleft')"));
+}
+
+TEST_CASE(dwindleTargetedSelectorScopesFloatingAndTiled) {
+
+    // of the three focus-relative selector forms, "active" is refused for
+    // targeted messages, but "floating" and "tiled" are allowed because the
+    // workspace constraint makes them answer for the workspace addressed
+    // rather than the focused window's - including when no window is focused
+    // there at all.
+
+    const auto targeted = [](const std::string& ws, const std::string& msg) {
+        return getFromSocket(std::format("/dispatch hl.dsp.layout({{ message = '{}', workspace = '{}' }})", msg, ws));
+    };
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '2' })"));
+    SPAWN_KITTY("t1");
+    SPAWN_KITTY("t2");
+    Tests::waitUntilWindowsN(2);
+
+    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '1' })"));
+    SPAWN_KITTY("here");
+    Tests::waitUntilWindowsN(3);
+
+    // "tiled" resolves on workspace 2 even though focus is on 1
+    const auto BEFORE = getFromSocket("/clients");
+    OK(targeted("2", "preselect r tiled"));
+    OK(getFromSocket("/eval hl.window_rule({ match = { class = 'landed' }, workspace = '2 silent' })"));
+    SPAWN_KITTY("landed");
+    Tests::waitUntilWindowsN(4);
+
+    EXPECT_CONTAINS(windowBlock(getFromSocket("/clients"), "landed", 2), "workspace: 2");
+    EXPECT(Tests::getAttribute(windowBlock(getFromSocket("/clients"), "here"), "at"), Tests::getAttribute(windowBlock(BEFORE, "here"), "at"));
+    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 1");
+
+    // and "floating" finds nothing on a workspace that has no floating window,
+    // rather than answering from the focused window's workspace
+    EXPECT_NOT(targeted("2", "preselect r floating"), "ok");
 }
