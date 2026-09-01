@@ -39,6 +39,11 @@ CViewQuery&& CViewQuery::selector(std::string_view selector) && {
     return std::move(*this);
 }
 
+CViewQuery&& CViewQuery::workspace(PHLWORKSPACE workspace) && {
+    m_workspace = workspace;
+    return std::move(*this);
+}
+
 CViewQuery&& CViewQuery::urgent() && {
     m_urgent = true;
     return std::move(*this);
@@ -108,17 +113,21 @@ PHLWINDOW CViewQuery::bySelector() const {
         MODE_ACTIVE_WINDOW,
     };
 
-    if (regexp.starts_with("active"))
-        return focusState()->window();
-    else if (regexp.starts_with("floating") || regexp.starts_with("tiled")) {
-        if (!focusState()->window())
+    if (regexp.starts_with("active")) {
+        // the focused window is only an answer for the workspace it is on
+        const auto ACTIVE = focusState()->window();
+        return m_workspace && (!ACTIVE || ACTIVE->m_workspace != m_workspace) ? nullptr : ACTIVE;
+    } else if (regexp.starts_with("floating") || regexp.starts_with("tiled")) {
+        // unconstrained these search the focused window's workspace; with a
+        // constraint they search the one asked for, focus or no focus
+        const auto SCOPE = m_workspace ? m_workspace : (focusState()->window() ? focusState()->window()->m_workspace : nullptr);
+        if (!SCOPE)
             return nullptr;
 
         const bool FLOAT = regexp.starts_with("floating");
 
         for (auto const& w : m_tracker.windows()) {
-            if (!w->mapped() || w->isFloating() != FLOAT || w->m_workspace != focusState()->window()->m_workspace ||
-                w->hasInputBlockedReasonsBesides(Desktop::View::FOCUS_BLOCK_BELOW_FULLSCREEN))
+            if (!w->mapped() || w->isFloating() != FLOAT || w->m_workspace != SCOPE || w->hasInputBlockedReasonsBesides(Desktop::View::FOCUS_BLOCK_BELOW_FULLSCREEN))
                 continue;
 
             return w;
@@ -308,6 +317,9 @@ bool CViewQuery::windowMatchesCommon(PHLWINDOW window) const {
         return false;
 
     if (m_mappedOnly && !window->mapped())
+        return false;
+
+    if (m_workspace && window->m_workspace != m_workspace)
         return false;
 
     return true;
