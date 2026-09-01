@@ -82,7 +82,7 @@ namespace Config::Actions {
     ActionResult focusMonitor(PHLMONITOR mon);
     ActionResult swapActiveWorkspaces(PHLMONITOR mon1, PHLMONITOR mon2);
 
-    ActionResult layoutMessage(const std::string& msg);
+    ActionResult layoutMessage(const std::string& msg, const std::string& workspaceSelector = "");
 
     ActionResult moveCursor(const Vector2D& pos);
     ActionResult exit();

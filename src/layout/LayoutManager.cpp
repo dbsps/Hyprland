@@ -12,6 +12,10 @@
 #include "../desktop/view/Group.hpp"
 #include "../desktop/view/window/WindowGroupMembership.hpp"
 #include "../event/EventBus.hpp"
+#include "../helpers/MiscFunctions.hpp"
+
+#include <format>
+#include <hyprutils/string/String.hpp>
 
 using namespace Layout;
 
@@ -88,7 +92,32 @@ void CLayoutManager::setTargetGeom(const CBox& box, SP<ITarget> target) {
     target->space()->setTargetGeom(box, target);
 }
 
-Config::ErrorResult CLayoutManager::layoutMsg(const std::string_view& sv) {
+Config::ErrorResult CLayoutManager::layoutMsg(const std::string_view& sv, const std::string_view& workspaceSelector) {
+    // the message is an opaque, layout-owned string. only the targeted path
+    // needs to look at it, and even then only to name it in an error.
+    const auto MSG = Hyprutils::String::trim(sv);
+
+    // an explicitly addressed workspace. algorithms are per-workspace, so
+    // without this, state a message sets and something later consumes - like
+    // dwindle's preselect - can only ever be prepared for the workspace in
+    // focus, and tooling that manages layouts has to move focus to reach one.
+    if (!workspaceSelector.empty()) {
+        const auto WSID = getWorkspaceIDNameFromString(std::string{workspaceSelector}).id;
+        if (WSID == WORKSPACE_INVALID)
+            return Config::configError("Invalid workspace selector for layoutmsg", Config::eConfigErrorLevel::ERROR, Config::eConfigErrorCode::INVALID_ARGUMENT);
+
+        const auto TARGET_WS = State::workspaceState()->query().id(WSID).run();
+        if (!TARGET_WS)
+            return Config::configError("Workspace not found, can't target", Config::eConfigErrorLevel::ERROR, Config::eConfigErrorCode::NO_TARGET);
+
+        // most layout messages take their node from the focused window, so
+        // addressing another workspace with one would act on whatever the user
+        // is looking at - or, worse, quietly do nothing and report success.
+        // algorithms opt in per message, and the default is to refuse. the
+        // answer does not depend on whether the workspace addressed happens to
+        // be the active one.
+        return TARGET_WS->m_space->targetedLayoutMsg(MSG);
+    }
 
     const auto MONITOR = Desktop::focusState()->monitor();
     // forward to the active workspace

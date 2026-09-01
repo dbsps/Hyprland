@@ -14,6 +14,10 @@ Config::ErrorResult IModeAlgorithm::layoutMsg(const std::string_view& sv) {
     return {};
 }
 
+bool IModeAlgorithm::supportsTargetedLayoutMsg(const std::string_view& sv) const {
+    return false;
+}
+
 std::optional<Vector2D> IModeAlgorithm::predictSizeForNewTarget() {
     return std::nullopt;
 }

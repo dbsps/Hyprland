@@ -51,6 +51,7 @@ namespace Layout {
         void                            toggleTargetFloating(SP<ITarget> t);
 
         Config::ErrorResult             layoutMsg(const std::string_view& sv);
+        Config::ErrorResult             targetedLayoutMsg(const std::string_view& sv);
         std::optional<Vector2D>         predictSizeForNewTiledTarget();
 
         const CBox&                     workArea(bool floating = false) const;

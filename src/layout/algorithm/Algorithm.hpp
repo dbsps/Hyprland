@@ -33,6 +33,7 @@ namespace Layout {
         void                          setFloating(SP<ITarget> target, bool floating, bool reposition = false);
 
         Config::ErrorResult           layoutMsg(const std::string_view& sv);
+        Config::ErrorResult           targetedLayoutMsg(const std::string_view& sv);
         std::optional<Vector2D>       predictSizeForNewTiledTarget();
 
         void                          recalculate(eRecalculateReason reason = RECALCULATE_REASON_UNKNOWN);

@@ -197,7 +197,8 @@ static int dsp_pass(lua_State* L) {
 }
 
 static int dsp_layoutMsg(lua_State* L) {
-    return Internal::checkResult(L, CA::layoutMessage(lua_tostring(L, lua_upvalueindex(1))));
+    const auto WS = lua_isnil(L, lua_upvalueindex(2)) ? "" : lua_tostring(L, lua_upvalueindex(2));
+    return Internal::checkResult(L, CA::layoutMessage(lua_tostring(L, lua_upvalueindex(1)), WS));
 }
 
 static int dsp_dpms(lua_State* L) {
@@ -288,12 +289,40 @@ static int hlPass(lua_State* L) {
 }
 
 static int hlLayout(lua_State* L) {
-    auto str = Check::string(L, 1);
-    if (!str)
-        return Internal::configError(L, std::format("layout: bad argument 1: {}", str.error()));
+    std::string                msg;
+    std::optional<std::string> ws;
 
-    lua_pushstring(L, str->c_str());
-    lua_pushcclosure(L, dsp_layoutMsg, 1);
+    // hl.dsp.layout("preselect r class:foo")
+    // hl.dsp.layout({ message = "preselect r class:foo", workspace = "5" })
+    //
+    // the table form exists to address a workspace, so it requires one. that
+    // also means a mistyped field cannot quietly degrade into a message aimed
+    // at whatever workspace happens to be active.
+    if (lua_istable(L, 1)) {
+        const auto MSG = Internal::tableOptStr(L, 1, "message");
+        if (!MSG || MSG->empty())
+            return Internal::configError(L, "layout: table form needs a non-empty 'message'");
+
+        const auto WS = Internal::tableOptWorkspaceSelector(L, 1, "workspace", "hl.layout");
+        if (!WS || WS->empty())
+            return Internal::configError(L, "layout: table form needs a 'workspace'; use the string form for the active one");
+
+        msg = *MSG;
+        ws  = *WS;
+    } else {
+        auto str = Check::string(L, 1);
+        if (!str)
+            return Internal::configError(L, std::format("layout: bad argument 1: {}", str.error()));
+
+        msg = *str;
+    }
+
+    lua_pushstring(L, msg.c_str());
+    if (ws)
+        lua_pushstring(L, ws->c_str());
+    else
+        lua_pushnil(L);
+    lua_pushcclosure(L, dsp_layoutMsg, 2);
     return 1;
 }
 

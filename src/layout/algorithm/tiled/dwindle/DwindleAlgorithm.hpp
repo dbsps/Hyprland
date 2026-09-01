@@ -40,6 +40,7 @@ namespace Layout::Tiled {
         virtual SP<ITarget>             getNextCandidate(SP<ITarget> old);
 
         virtual Config::ErrorResult     layoutMsg(const std::string_view& sv);
+        virtual bool                    supportsTargetedLayoutMsg(const std::string_view& sv) const;
         virtual std::optional<Vector2D> predictSizeForNewTarget();
 
         virtual void                    swapTargets(SP<ITarget> a, SP<ITarget> b);
