@@ -1171,8 +1171,8 @@ ActionResult Actions::swapActiveWorkspaces(PHLMONITOR mon1, PHLMONITOR mon2) {
     return {};
 }
 
-ActionResult Actions::layoutMessage(const std::string& msg) {
-    auto ret = g_layoutManager->layoutMsg(msg);
+ActionResult Actions::layoutMessage(const std::string& msg, const std::string& workspaceSelector) {
+    auto ret = g_layoutManager->layoutMsg(msg, workspaceSelector);
     if (!ret)
         return std::unexpected(ret.error());
     return {};

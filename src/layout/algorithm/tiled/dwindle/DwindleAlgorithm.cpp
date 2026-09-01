@@ -683,23 +683,54 @@ static bool isPreselectDirection(const std::string_view& dir) {
     return !dir.empty() && std::string_view{"utdbrl"}.contains(dir.front());
 }
 
+// "active" resolves to the focused window, so it answers differently depending
+// on where the user is looking - exactly what addressing a workspace explicitly
+// is meant to avoid. "floating" and "tiled" are workspace-relative once the
+// query is constrained, so they are fine.
+static bool isFocusRelativeSelector(const std::string_view& selector) {
+    return selector.starts_with("active");
+}
+
+bool CDwindleAlgorithm::supportsTargetedLayoutMsg(const std::string_view& sv) const {
+    const auto ARGS = CVarList2(std::string{sv}, 0, ' ');
+
+    // a directional preselect decides where the next window lands, so against
+    // an addressed workspace it has to name the node it splits rather than
+    // fall back to the pointer or the focused window. the reset form places
+    // nothing - it only clears this workspace's pending state - so it needs no
+    // target and is safe as it is.
+    if (ARGS[0] == "preselect")
+        return !isPreselectDirection(ARGS[1]) || (!ARGS[2].empty() && !isFocusRelativeSelector(ARGS[2]));
+
+    // movetoroot acts on a node, and takes it from the focused window unless
+    // told otherwise
+    if (ARGS[0] == "movetoroot")
+        return !ARGS[1].empty() && !isFocusRelativeSelector(ARGS[1]);
+
+    // togglesplit, swapsplit, rotatesplit and splitratio have no way to say
+    // which node they mean
+    return false;
+}
+
 Config::ErrorResult CDwindleAlgorithm::layoutMsg(const std::string_view& sv) {
     const auto ARGS = CVarList2(std::string{sv}, 0, ' ');
 
-    const auto CURRENT_NODE = getNodeFromWindow(Desktop::focusState()->window());
+    // read lazily: a message that names its own target must not consult the
+    // focused window at all, or the contract the gate advertises is a fiction
+    const auto currentNode = [this] { return getNodeFromWindow(Desktop::focusState()->window()); };
 
     if (ARGS[0] == "togglesplit") {
-        if (CURRENT_NODE) {
+        if (const auto CURRENT_NODE = currentNode(); CURRENT_NODE) {
             if (!toggleSplit(CURRENT_NODE))
                 return Config::configError("can't togglesplit in the current workspace", Config::eConfigErrorLevel::WARNING, Config::eConfigErrorCode::INVALID_STATE);
         }
     } else if (ARGS[0] == "swapsplit") {
-        if (CURRENT_NODE) {
+        if (const auto CURRENT_NODE = currentNode(); CURRENT_NODE) {
             if (!swapSplit(CURRENT_NODE))
                 return Config::configError("can't swapsplit in the current workspace", Config::eConfigErrorLevel::WARNING, Config::eConfigErrorCode::INVALID_STATE);
         }
     } else if (ARGS[0] == "rotatesplit") {
-        if (CURRENT_NODE) {
+        if (const auto CURRENT_NODE = currentNode(); CURRENT_NODE) {
             int angle = 90;
             if (!ARGS[1].empty()) {
                 try {
@@ -712,7 +743,7 @@ Config::ErrorResult CDwindleAlgorithm::layoutMsg(const std::string_view& sv) {
             rotateSplit(CURRENT_NODE, angle);
         }
     } else if (ARGS[0] == "movetoroot") {
-        auto node = CURRENT_NODE;
+        auto node = ARGS[1].empty() ? currentNode() : nullptr;
         if (!ARGS[1].empty()) {
             // an explicit selector is authoritative, and answers for this
             // workspace. resolving globally picks whichever match enumerates
@@ -802,6 +833,7 @@ Config::ErrorResult CDwindleAlgorithm::layoutMsg(const std::string_view& sv) {
 
         auto       delta = getPlusMinusKeywordResult(std::string{ratio}, 0.F);
 
+        const auto CURRENT_NODE = currentNode();
         if (!CURRENT_NODE || !CURRENT_NODE->pParent)
             return Config::configError("cannot alter split ratio on no / single node", Config::eConfigErrorLevel::WARNING, Config::eConfigErrorCode::INVALID_STATE);
 

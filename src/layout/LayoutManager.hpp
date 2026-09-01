@@ -82,7 +82,7 @@ namespace Layout {
         void                    setTargetGeom(const CBox& box, SP<ITarget> target); // floats only
         void                    endDragTarget();
 
-        Config::ErrorResult     layoutMsg(const std::string_view& sv);
+        Config::ErrorResult     layoutMsg(const std::string_view& sv, const std::string_view& workspaceSelector = {});
 
         void                    switchTargets(SP<ITarget> a, SP<ITarget> b, bool preserveFocus = true);
 

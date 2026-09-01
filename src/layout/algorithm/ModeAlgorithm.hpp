@@ -44,6 +44,19 @@ namespace Layout {
         // optional: handle layout messages
         virtual Config::ErrorResult layoutMsg(const std::string_view& sv);
 
+        // whether this message may be handled for an explicitly addressed
+        // workspace: that is, whether handling it does not depend on or mutate
+        // interactive state outside that workspace - the focused window, the
+        // pointer, the active workspace - so that it behaves the same wherever
+        // the user happens to be looking.
+        //
+        // this is a question about safety, not about arguments. a message that
+        // acts on a node generally has to be told which one, but one that only
+        // touches its own workspace's state may need no target at all.
+        //
+        // refusing is the default. algorithms opt in per message.
+        virtual bool supportsTargetedLayoutMsg(const std::string_view& sv) const;
+
         // optional: predict new window's size
         virtual std::optional<Vector2D> predictSizeForNewTarget();
 

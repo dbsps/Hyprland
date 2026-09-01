@@ -1,5 +1,7 @@
 #include "Algorithm.hpp"
 
+#include <format>
+
 #include "FloatingAlgorithm.hpp"
 #include "TiledAlgorithm.hpp"
 #include "../target/WindowTarget.hpp"
@@ -109,6 +111,30 @@ void CAlgorithm::recalculate(eRecalculateReason reason) {
 void CAlgorithm::recenter(SP<ITarget> t) {
     if (t->floating())
         m_floating->recenter(t);
+}
+
+Config::ErrorResult CAlgorithm::targetedLayoutMsg(const std::string_view& sv) {
+    // asking and dispatching are one step on purpose. a mode algorithm that did
+    // not opt in must not receive the message because the other one did, and
+    // keeping the two decisions apart is how that goes wrong.
+    const bool FLOATING = m_floating->supportsTargetedLayoutMsg(sv);
+    const bool TILED    = m_tiled->supportsTargetedLayoutMsg(sv);
+
+    if (!FLOATING && !TILED) {
+        const auto NAME = sv.substr(0, sv.find(' '));
+        return Config::configError(std::format("{} does not support targeting a workspace", NAME.empty() ? "that message" : NAME), Config::eConfigErrorLevel::ERROR,
+                                   Config::eConfigErrorCode::INVALID_ARGUMENT);
+    }
+
+    if (FLOATING) {
+        if (const auto ret = m_floating->layoutMsg(sv); !ret)
+            return ret;
+    }
+
+    if (TILED)
+        return m_tiled->layoutMsg(sv);
+
+    return {};
 }
 
 Config::ErrorResult CAlgorithm::layoutMsg(const std::string_view& sv) {
