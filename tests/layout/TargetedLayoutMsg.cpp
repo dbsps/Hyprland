@@ -1,6 +1,6 @@
 #include <layout/algorithm/Algorithm.hpp>
 #include <layout/algorithm/TiledAlgorithm.hpp>
-#include <layout/algorithm/floating/FloatingAlgorithm.hpp>
+#include <layout/algorithm/FloatingAlgorithm.hpp>
 
 #include <gtest/gtest.h>
 
@@ -42,7 +42,12 @@ namespace {
         }
     };
 
-    using CRecordingFloating = CRecordingAlgorithm<IFloatingAlgorithm>;
+    class CRecordingFloating : public CRecordingAlgorithm<IFloatingAlgorithm> {
+      public:
+        using CRecordingAlgorithm::CRecordingAlgorithm;
+        void moveTarget(const Vector2D&, SP<ITarget>) override {}
+        void setTargetGeom(const CBox&, SP<ITarget>) override {}
+    };
 
     struct SFixture {
         CRecordingTiled*    tiled    = nullptr;
