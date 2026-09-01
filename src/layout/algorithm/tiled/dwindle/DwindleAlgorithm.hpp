@@ -73,5 +73,7 @@ namespace Layout::Tiled {
         bool                    moveToRoot(SP<SDwindleNodeData>, bool stable = true);
 
         Math::eDirection        m_overrideDirection = Math::DIRECTION_DEFAULT;
+        // set by `preselect <dir> <window>`, consumed by the next window
+        PHLWINDOWREF m_preselectOn;
     };
 };
