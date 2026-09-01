@@ -714,9 +714,17 @@ Config::ErrorResult CDwindleAlgorithm::layoutMsg(const std::string_view& sv) {
     } else if (ARGS[0] == "movetoroot") {
         auto node = CURRENT_NODE;
         if (!ARGS[1].empty()) {
-            auto w = Desktop::viewState()->query().selector(std::string{ARGS[1]}).runWindow();
-            if (w)
-                node = getNodeFromWindow(w);
+            // an explicit selector is authoritative, and answers for this
+            // workspace. resolving globally picks whichever match enumerates
+            // first, and falling back to the focused node on no match turns a
+            // named target back into an implicit one.
+            const auto W = Desktop::viewState()->query().selector(std::string{ARGS[1]}).workspace(m_parent->space()->workspace()).runWindow();
+            if (!W)
+                return Config::configError("movetoroot: no window matches that selector", Config::eConfigErrorLevel::ERROR, Config::eConfigErrorCode::NO_TARGET);
+
+            node = getNodeFromWindow(W);
+            if (!node)
+                return Config::configError("movetoroot: that window is not tiled here", Config::eConfigErrorLevel::ERROR, Config::eConfigErrorCode::INVALID_STATE);
         }
 
         const auto STABLE = ARGS[2].empty() || ARGS[2] != "unstable";
