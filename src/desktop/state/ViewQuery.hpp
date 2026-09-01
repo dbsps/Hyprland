@@ -25,6 +25,7 @@ namespace Desktop {
         CViewQuery&& surface(SP<CWLSurfaceResource> surface) &&;
         CViewQuery&& handle(uint32_t handle) &&;
         CViewQuery&& selector(std::string_view selector) &&;
+        CViewQuery&& workspace(PHLWORKSPACE workspace) &&;
         CViewQuery&& urgent() &&;
         CViewQuery&& forceFocus() &&;
         CViewQuery&& mappedOnly(bool mappedOnly = true) &&;
@@ -50,6 +51,7 @@ namespace Desktop {
         std::optional<SP<CWLSurfaceResource>> m_surface;
         std::optional<uint32_t>               m_handle;
         std::optional<std::string>            m_selector;
+        PHLWORKSPACE                          m_workspace;
 
         bool                                  m_urgent     = false;
         bool                                  m_forceFocus = false;
