@@ -80,10 +80,15 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target) {
 
     SP<SDwindleNodeData> OPENINGON;
 
-    const auto           MOUSECOORDS = m_overrideFocalPoint.value_or(g_pInputManager->getMouseCoordsInternal());
-    const auto           ACTIVE_MON  = Desktop::focusState()->monitor();
+    const auto           PRESELECT_ON = m_preselectOn.lock();
+    m_preselectOn.reset();                                                                // consumed by the next window here, split or not
+    const auto PRESELECT_NODE = PRESELECT_ON ? getNodeFromWindow(PRESELECT_ON) : nullptr; // may have closed since
+    const auto MOUSECOORDS    = m_overrideFocalPoint.value_or(g_pInputManager->getMouseCoordsInternal());
+    const auto ACTIVE_MON     = Desktop::focusState()->monitor();
 
-    if ((PWORKSPACE == ACTIVE_MON->m_activeWorkspace || (PWORKSPACE->m_isSpecialWorkspace && PMONITOR->m_activeSpecialWorkspace)) && !*PUSEACTIVE) {
+    if (PRESELECT_NODE)
+        OPENINGON = PRESELECT_NODE;
+    else if ((PWORKSPACE == ACTIVE_MON->m_activeWorkspace || (PWORKSPACE->m_isSpecialWorkspace && PMONITOR->m_activeSpecialWorkspace)) && !*PUSEACTIVE) {
         OPENINGON = getNodeFromWindow(
             Desktop::viewState()->hitTest().windowAt(MOUSECOORDS, Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::SKIP_FULLSCREEN_PRIORITY));
 
@@ -671,6 +676,13 @@ SP<SDwindleNodeData> CDwindleAlgorithm::getMasterNode() {
     return nullptr;
 }
 
+// u/t/d/b/r/l set a direction; anything else is the legacy reset that
+// permanent_direction_override needs. the gate and the handler both ask here,
+// so they cannot disagree about which form a message is.
+static bool isPreselectDirection(const std::string_view& dir) {
+    return !dir.empty() && std::string_view{"utdbrl"}.contains(dir.front());
+}
+
 Config::ErrorResult CDwindleAlgorithm::layoutMsg(const std::string_view& sv) {
     const auto ARGS = CVarList2(std::string{sv}, 0, ' ');
 
@@ -718,32 +730,61 @@ Config::ErrorResult CDwindleAlgorithm::layoutMsg(const std::string_view& sv) {
             return Config::configError("No direction for preselect", Config::eConfigErrorLevel::ERROR, Config::eConfigErrorCode::INVALID_ARGUMENT);
         }
 
+        // the legacy reset. it clears this workspace's pending state whole and
+        // has no window of its own to resolve, so it cannot fail on one.
+        if (!isPreselectDirection(direction)) {
+            if (!ARGS[2].empty())
+                Log::logger->log(Log::WARN, "preselect: a reset takes no window, ignoring '{}'", ARGS[2]);
+
+            m_overrideDirection = Math::DIRECTION_DEFAULT;
+            m_preselectOn.reset();
+            return {};
+        }
+
+        // resolved into a local: nothing below may fail after the pending
+        // state has been touched
+        Math::eDirection preselectDirection = Math::DIRECTION_DEFAULT;
+
         switch (direction.front()) {
             case 'u':
             case 't': {
-                m_overrideDirection = Math::DIRECTION_UP;
+                preselectDirection = Math::DIRECTION_UP;
                 break;
             }
             case 'd':
             case 'b': {
-                m_overrideDirection = Math::DIRECTION_DOWN;
+                preselectDirection = Math::DIRECTION_DOWN;
                 break;
             }
             case 'r': {
-                m_overrideDirection = Math::DIRECTION_RIGHT;
+                preselectDirection = Math::DIRECTION_RIGHT;
                 break;
             }
             case 'l': {
-                m_overrideDirection = Math::DIRECTION_LEFT;
+                preselectDirection = Math::DIRECTION_LEFT;
                 break;
             }
-            default: {
-                // any other character resets the focus direction
-                // needed for the persistent mode
-                m_overrideDirection = Math::DIRECTION_DEFAULT;
-                break;
-            }
+            default: break; // guarded by isPreselectDirection above
         }
+
+        // optional: which window to split off. without it that's whatever is
+        // nearest the mouse, which is useless for an off-screen workspace.
+        PHLWINDOWREF preselectOn;
+        if (!ARGS[2].empty()) {
+            // scoped to this workspace: an unscoped query answers with whichever
+            // match it enumerates first, which for a duplicate class is a coin flip
+            const auto W = Desktop::viewState()->query().selector(std::string{ARGS[2]}).workspace(m_parent->space()->workspace()).runWindow();
+            if (!W)
+                return Config::configError("preselect: no window matches that selector", Config::eConfigErrorLevel::ERROR, Config::eConfigErrorCode::NO_TARGET);
+            if (!getNodeFromWindow(W))
+                return Config::configError("preselect: that window is not tiled here", Config::eConfigErrorLevel::ERROR, Config::eConfigErrorCode::INVALID_STATE);
+            preselectOn = W;
+        }
+
+        // the message is good, so it replaces the pending preselection whole:
+        // an unnamed one after a named one must not inherit its target
+        m_overrideDirection = preselectDirection;
+        m_preselectOn       = preselectOn;
     } else if (ARGS[0] == "splitratio") {
         auto ratio = ARGS[1];
         bool exact = ARGS[2].starts_with("exact");
@@ -751,7 +792,7 @@ Config::ErrorResult CDwindleAlgorithm::layoutMsg(const std::string_view& sv) {
         if (ratio.empty())
             return Config::configError("splitratio requires an arg", Config::eConfigErrorLevel::ERROR, Config::eConfigErrorCode::INVALID_ARGUMENT);
 
-        auto delta = getPlusMinusKeywordResult(std::string{ratio}, 0.F);
+        auto       delta = getPlusMinusKeywordResult(std::string{ratio}, 0.F);
 
         if (!CURRENT_NODE || !CURRENT_NODE->pParent)
             return Config::configError("cannot alter split ratio on no / single node", Config::eConfigErrorLevel::WARNING, Config::eConfigErrorCode::INVALID_STATE);
